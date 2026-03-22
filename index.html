@@ -464,60 +464,62 @@ function initFirebase() {
         }
       });
 
-      // Cambio E: cargar catálogo de máquinas desde Firebase (fuente única de verdad)
-      _fbDB.ref('slotmap_machines').once('value').then(function(snap) {
-        var catalog = snap.val();
-        if (catalog && Object.keys(catalog).length > 0) {
-          // Asignar coordenadas x,y a cada máquina según su isla
-          // Primero leer layout para saber posiciones de islas
-          _fbDB.ref('slotmap_layout').once('value').then(function(snapL) {
-            var layoutEdits = snapL.val() || {};
-            // Construir mapa isla -> posicion base
-            var islaPos = {};
-            var islaIdx = {}; // contador de maquinas por isla para posicionar en grid
-            // Extraer posiciones de islas del catalogo existente (MI hardcodeado)
-            Object.keys(MI).forEach(function(uid) {
-              var m = MI[uid];
-              if (m.i && !islaPos[m.i]) {
-                var e = layoutEdits[m.i] || {dx:0, dy:0};
-                islaPos[m.i] = {x: m.x + e.dx, y: m.y + e.dy};
-              }
-            });
-            // Asignar x,y a cada maquina del nuevo catalogo
-            Object.keys(catalog).forEach(function(uid) {
-              var m = catalog[uid];
-              var isla = m.i || uid.slice(0,2);
-              if (!islaIdx[isla]) islaIdx[isla] = 0;
-              var base = islaPos[isla];
-              if (base) {
-                // Posicionar en grid dentro de la isla (max 4 por fila)
-                var idx = islaIdx[isla];
-                catalog[uid].x = base.x + (idx % 4);
-                catalog[uid].y = base.y + Math.floor(idx / 4);
-              } else {
-                // Isla nueva sin coordenadas conocidas: poner fuera de vista temporalmente
-                catalog[uid].x = 1;
-                catalog[uid].y = 1;
-              }
-              islaIdx[isla]++;
-            });
-            MI = catalog;
-            _layoutEdits = layoutEdits;
-            updateHeader();
-            refreshAll();
-            notify('Catálogo cargado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+      // Cargar catálogo de máquinas + posiciones de islas desde Firebase
+      // slotmap_isle_positions: {isla -> {x, y, zona}} publicado por el admin al guardar layout
+      // slotmap_machines:       {uid  -> {i, j, p, z, ...}}
+      Promise.all([
+        _fbDB.ref('slotmap_machines').once('value'),
+        _fbDB.ref('slotmap_isle_positions').once('value'),
+        _fbDB.ref('slotmap_layout').once('value')
+      ]).then(function(snaps) {
+        var catalog      = snaps[0].val();
+        var islePos      = snaps[1].val();  // absolute {isla: {x,y,zona}} — admin's source of truth
+        var layoutEdits  = snaps[2].val() || {};
+
+        if (islePos && Object.keys(islePos).length) {
+          // Use admin-published isle positions (preferred — works for new islands too)
+          _islePositions = islePos;
+        } else {
+          // Fallback: reconstruct isle positions from hardcoded MI + layout deltas
+          _islePositions = {};
+          Object.keys(MI).forEach(function(uid) {
+            var m = MI[uid];
+            if (m.i && !_islePositions[m.i]) {
+              var e = layoutEdits[m.i] || {dx:0, dy:0};
+              _islePositions[m.i] = {x: m.x + e.dx, y: m.y + e.dy};
+            }
           });
         }
+
+        _layoutEdits = layoutEdits;
+
+        if (catalog && Object.keys(catalog).length > 0) {
+          // Assign pixel-grid coordinates to every machine based on its isle position
+          MI = assignCatalogCoords(catalog);
+          updateHeader();
+          refreshAll();
+          notify('Catálogo cargado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+        }
+      }).catch(function(e) {
+        console.warn('Error cargando catalogo:', e);
       });
 
-      // Listen for layout changes
+      // Listen for layout changes (also picks up isle position updates)
       _fbDB.ref('slotmap_layout').on('value', function(snap3) {
         var layout = snap3.val();
         if (layout) {
           _layoutEdits = layout;
-          if (document.getElementById('vl') && document.getElementById('vl').classList.contains('active')) {
-            renderL();
-          }
+          // Also reload isle positions whenever layout changes
+          _fbDB.ref('slotmap_isle_positions').once('value').then(function(snapIP) {
+            var ip = snapIP.val();
+            if (ip && Object.keys(ip).length) {
+              _islePositions = ip;
+              MI = assignCatalogCoords(MI);
+            }
+            if (document.getElementById('vl') && document.getElementById('vl').classList.contains('active')) {
+              renderL();
+            }
+          });
         }
       });
 
@@ -619,9 +621,36 @@ function initLayoutEdits(){
   try{ var s=localStorage.getItem('slotmap_layout'); if(s) _layoutEdits=JSON.parse(s); }catch(e){}
 }
 function saveLayoutEdits(){ localStorage.setItem('slotmap_layout',JSON.stringify(_layoutEdits)); }
+// Island positions loaded from Firebase/localStorage (published by admin's "Guardar")
+// Format: { "AA": {x, y, zona}, "AB": {x, y, zona}, ... }
+var _islePositions = {};
+
+// Assign x,y to every machine in a catalog using _islePositions.
+// Machines within each isle are laid out in a 4-per-row grid from the isle origin.
+function assignCatalogCoords(catalog) {
+  var islaIdx = {};
+  Object.keys(catalog).sort().forEach(function(uid) {
+    var m    = catalog[uid];
+    var isla = m.i || uid.slice(0, 2);
+    if (!islaIdx[isla]) islaIdx[isla] = 0;
+    var ip = _islePositions[isla];
+    if (ip) {
+      var idx = islaIdx[isla];
+      catalog[uid].x = ip.x + (idx % 4);
+      catalog[uid].y = ip.y + Math.floor(idx / 4);
+    } else {
+      catalog[uid].x = 1;
+      catalog[uid].y = 1;
+    }
+    islaIdx[isla]++;
+  });
+  return catalog;
+}
+
 function getMachinePos(uid){
-  var m=MI[uid], e=_layoutEdits[m.i];
-  return e?{x:m.x+e.dx,y:m.y+e.dy}:{x:m.x,y:m.y};
+  var m = MI[uid];
+  var e = _layoutEdits[m.i];
+  return e ? {x: m.x + e.dx, y: m.y + e.dy} : {x: m.x, y: m.y};
 }
 function toggleEditMode(){
   _editMode=!_editMode;
@@ -2342,9 +2371,17 @@ function dlCambios(){
 
 function syncLayoutFromCloud() {
   if (_fbDB) {
-    _fbDB.ref('slotmap_layout').once('value').then(function(snap){
-      var layout = snap.val();
-      _layoutEdits = layout || {};
+    Promise.all([
+      _fbDB.ref('slotmap_layout').once('value'),
+      _fbDB.ref('slotmap_isle_positions').once('value')
+    ]).then(function(snaps) {
+      _layoutEdits = snaps[0].val() || {};
+      var ip = snaps[1].val();
+      if (ip && Object.keys(ip).length) {
+        _islePositions = ip;
+        // Re-assign coordinates to all machines with fresh isle positions
+        MI = assignCatalogCoords(MI);
+      }
       renderL();
       notify('Layout sincronizado desde la nube', 'var(--cyan)');
     });
@@ -2354,8 +2391,13 @@ function syncLayoutFromCloud() {
 }
 function syncLayoutFromStorage_local() {
   try {
-    var s = localStorage.getItem('slotmap_layout');
+    var s  = localStorage.getItem('slotmap_layout');
+    var ip = localStorage.getItem('slotmap_isle_positions');
     _layoutEdits = s ? JSON.parse(s) : {};
+    if (ip) {
+      _islePositions = JSON.parse(ip);
+      MI = assignCatalogCoords(MI);
+    }
     renderL();
     notify('Layout sincronizado', 'var(--cyan)');
   } catch(e) {
@@ -2380,30 +2422,35 @@ window.addEventListener('storage', function(e) {
     refreshAll();
     notify('Datos actualizados desde Admin', 'var(--green)');
   }
-  // Cambio F: reaccionar a cambios del catálogo de máquinas (reemplazar completo)
+  // Reaccionar a cambios del catálogo de máquinas desde admin (cross-tab localStorage)
   if (e.key === 'slotmap_machines') {
     try {
       var catalog = JSON.parse(e.newValue);
       if (catalog && Object.keys(catalog).length > 0) {
-        // Asignar coordenadas preservando posiciones actuales de islas
-        var islaIdx = {};
-        Object.keys(catalog).forEach(function(uid) {
-          var m = catalog[uid];
-          var isla = m.i || uid.slice(0,2);
-          if (!islaIdx[isla]) islaIdx[isla] = 0;
-          // Buscar coordenada base de la isla en MI actual
-          var base = null;
-          Object.keys(MI).forEach(function(u) { if (MI[u].i === isla && !base) base = {x: MI[u].x, y: MI[u].y}; });
-          if (base) {
-            catalog[uid].x = base.x + (islaIdx[isla] % 4);
-            catalog[uid].y = base.y + Math.floor(islaIdx[isla] / 4);
-          } else { catalog[uid].x = 1; catalog[uid].y = 1; }
-          islaIdx[isla]++;
-        });
-        MI = catalog;
+        // Reload isle positions too in case admin also updated layout in same session
+        try {
+          var ip = localStorage.getItem('slotmap_isle_positions');
+          if (ip) _islePositions = JSON.parse(ip);
+        } catch(ie) {}
+        MI = assignCatalogCoords(catalog);
         updateHeader();
         refreshAll();
         notify('Catálogo actualizado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+      }
+    } catch(err) {}
+  }
+  // Reaccionar a cambios de posiciones de islas
+  if (e.key === 'slotmap_isle_positions') {
+    try {
+      var ip2 = JSON.parse(e.newValue);
+      if (ip2) {
+        _islePositions = ip2;
+        // Re-assign coords to all machines with new isle positions
+        MI = assignCatalogCoords(MI);
+        if (document.getElementById('vl') && document.getElementById('vl').classList.contains('active')) {
+          renderL();
+        }
+        notify('Posiciones de islas actualizadas', 'var(--cyan)');
       }
     } catch(err) {}
   }
@@ -2618,9 +2665,17 @@ function dlCambios(){
 
 function syncLayoutFromCloud() {
   if (_fbDB) {
-    _fbDB.ref('slotmap_layout').once('value').then(function(snap){
-      var layout = snap.val();
-      _layoutEdits = layout || {};
+    Promise.all([
+      _fbDB.ref('slotmap_layout').once('value'),
+      _fbDB.ref('slotmap_isle_positions').once('value')
+    ]).then(function(snaps) {
+      _layoutEdits = snaps[0].val() || {};
+      var ip = snaps[1].val();
+      if (ip && Object.keys(ip).length) {
+        _islePositions = ip;
+        // Re-assign coordinates to all machines with fresh isle positions
+        MI = assignCatalogCoords(MI);
+      }
       renderL();
       notify('Layout sincronizado desde la nube', 'var(--cyan)');
     });
@@ -2630,8 +2685,13 @@ function syncLayoutFromCloud() {
 }
 function syncLayoutFromStorage_local() {
   try {
-    var s = localStorage.getItem('slotmap_layout');
+    var s  = localStorage.getItem('slotmap_layout');
+    var ip = localStorage.getItem('slotmap_isle_positions');
     _layoutEdits = s ? JSON.parse(s) : {};
+    if (ip) {
+      _islePositions = JSON.parse(ip);
+      MI = assignCatalogCoords(MI);
+    }
     renderL();
     notify('Layout sincronizado', 'var(--cyan)');
   } catch(e) {
@@ -2656,30 +2716,35 @@ window.addEventListener('storage', function(e) {
     refreshAll();
     notify('Datos actualizados desde Admin', 'var(--green)');
   }
-  // Cambio F: reaccionar a cambios del catálogo de máquinas (reemplazar completo)
+  // Reaccionar a cambios del catálogo de máquinas desde admin (cross-tab localStorage)
   if (e.key === 'slotmap_machines') {
     try {
       var catalog = JSON.parse(e.newValue);
       if (catalog && Object.keys(catalog).length > 0) {
-        // Asignar coordenadas preservando posiciones actuales de islas
-        var islaIdx = {};
-        Object.keys(catalog).forEach(function(uid) {
-          var m = catalog[uid];
-          var isla = m.i || uid.slice(0,2);
-          if (!islaIdx[isla]) islaIdx[isla] = 0;
-          // Buscar coordenada base de la isla en MI actual
-          var base = null;
-          Object.keys(MI).forEach(function(u) { if (MI[u].i === isla && !base) base = {x: MI[u].x, y: MI[u].y}; });
-          if (base) {
-            catalog[uid].x = base.x + (islaIdx[isla] % 4);
-            catalog[uid].y = base.y + Math.floor(islaIdx[isla] / 4);
-          } else { catalog[uid].x = 1; catalog[uid].y = 1; }
-          islaIdx[isla]++;
-        });
-        MI = catalog;
+        // Reload isle positions too in case admin also updated layout in same session
+        try {
+          var ip = localStorage.getItem('slotmap_isle_positions');
+          if (ip) _islePositions = JSON.parse(ip);
+        } catch(ie) {}
+        MI = assignCatalogCoords(catalog);
         updateHeader();
         refreshAll();
         notify('Catálogo actualizado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+      }
+    } catch(err) {}
+  }
+  // Reaccionar a cambios de posiciones de islas
+  if (e.key === 'slotmap_isle_positions') {
+    try {
+      var ip2 = JSON.parse(e.newValue);
+      if (ip2) {
+        _islePositions = ip2;
+        // Re-assign coords to all machines with new isle positions
+        MI = assignCatalogCoords(MI);
+        if (document.getElementById('vl') && document.getElementById('vl').classList.contains('active')) {
+          renderL();
+        }
+        notify('Posiciones de islas actualizadas', 'var(--cyan)');
       }
     } catch(err) {}
   }
