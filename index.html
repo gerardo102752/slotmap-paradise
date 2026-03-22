@@ -468,11 +468,45 @@ function initFirebase() {
       _fbDB.ref('slotmap_machines').once('value').then(function(snap) {
         var catalog = snap.val();
         if (catalog && Object.keys(catalog).length > 0) {
-          // Reemplazar MI completamente con el catálogo de Firebase
-          MI = catalog;
-          updateHeader();
-          refreshAll();
-          notify('Catálogo cargado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+          // Asignar coordenadas x,y a cada máquina según su isla
+          // Primero leer layout para saber posiciones de islas
+          _fbDB.ref('slotmap_layout').once('value').then(function(snapL) {
+            var layoutEdits = snapL.val() || {};
+            // Construir mapa isla -> posicion base
+            var islaPos = {};
+            var islaIdx = {}; // contador de maquinas por isla para posicionar en grid
+            // Extraer posiciones de islas del catalogo existente (MI hardcodeado)
+            Object.keys(MI).forEach(function(uid) {
+              var m = MI[uid];
+              if (m.i && !islaPos[m.i]) {
+                var e = layoutEdits[m.i] || {dx:0, dy:0};
+                islaPos[m.i] = {x: m.x + e.dx, y: m.y + e.dy};
+              }
+            });
+            // Asignar x,y a cada maquina del nuevo catalogo
+            Object.keys(catalog).forEach(function(uid) {
+              var m = catalog[uid];
+              var isla = m.i || uid.slice(0,2);
+              if (!islaIdx[isla]) islaIdx[isla] = 0;
+              var base = islaPos[isla];
+              if (base) {
+                // Posicionar en grid dentro de la isla (max 4 por fila)
+                var idx = islaIdx[isla];
+                catalog[uid].x = base.x + (idx % 4);
+                catalog[uid].y = base.y + Math.floor(idx / 4);
+              } else {
+                // Isla nueva sin coordenadas conocidas: poner fuera de vista temporalmente
+                catalog[uid].x = 1;
+                catalog[uid].y = 1;
+              }
+              islaIdx[isla]++;
+            });
+            MI = catalog;
+            _layoutEdits = layoutEdits;
+            updateHeader();
+            refreshAll();
+            notify('Catálogo cargado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+          });
         }
       });
 
@@ -2351,6 +2385,21 @@ window.addEventListener('storage', function(e) {
     try {
       var catalog = JSON.parse(e.newValue);
       if (catalog && Object.keys(catalog).length > 0) {
+        // Asignar coordenadas preservando posiciones actuales de islas
+        var islaIdx = {};
+        Object.keys(catalog).forEach(function(uid) {
+          var m = catalog[uid];
+          var isla = m.i || uid.slice(0,2);
+          if (!islaIdx[isla]) islaIdx[isla] = 0;
+          // Buscar coordenada base de la isla en MI actual
+          var base = null;
+          Object.keys(MI).forEach(function(u) { if (MI[u].i === isla && !base) base = {x: MI[u].x, y: MI[u].y}; });
+          if (base) {
+            catalog[uid].x = base.x + (islaIdx[isla] % 4);
+            catalog[uid].y = base.y + Math.floor(islaIdx[isla] / 4);
+          } else { catalog[uid].x = 1; catalog[uid].y = 1; }
+          islaIdx[isla]++;
+        });
         MI = catalog;
         updateHeader();
         refreshAll();
@@ -2612,6 +2661,21 @@ window.addEventListener('storage', function(e) {
     try {
       var catalog = JSON.parse(e.newValue);
       if (catalog && Object.keys(catalog).length > 0) {
+        // Asignar coordenadas preservando posiciones actuales de islas
+        var islaIdx = {};
+        Object.keys(catalog).forEach(function(uid) {
+          var m = catalog[uid];
+          var isla = m.i || uid.slice(0,2);
+          if (!islaIdx[isla]) islaIdx[isla] = 0;
+          // Buscar coordenada base de la isla en MI actual
+          var base = null;
+          Object.keys(MI).forEach(function(u) { if (MI[u].i === isla && !base) base = {x: MI[u].x, y: MI[u].y}; });
+          if (base) {
+            catalog[uid].x = base.x + (islaIdx[isla] % 4);
+            catalog[uid].y = base.y + Math.floor(islaIdx[isla] / 4);
+          } else { catalog[uid].x = 1; catalog[uid].y = 1; }
+          islaIdx[isla]++;
+        });
         MI = catalog;
         updateHeader();
         refreshAll();
