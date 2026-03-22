@@ -356,12 +356,18 @@ function resetDatosFirebase() {
 
 function saveLayoutFirebase() {
   if (!_fbDB) { notify('Sin conexion','var(--red)'); return; }
-  var edits = _buildMainAppEdits();
-  _fbDB.ref('slotmap_layout').set(edits).then(function() {
-    log('ok','Layout guardado en Firebase: '+Object.keys(edits).length+' islas');
-    notify('Layout guardado en la nube');
-  }).catch(function(e){
-    log('err','Error layout: '+e.message);
+  var edits         = _buildMainAppEdits();
+  var islePositions = _buildIslePositions();
+
+  var updates = {};
+  updates['slotmap_layout']         = edits;          // delta format (legacy compat)
+  updates['slotmap_isle_positions'] = islePositions;  // absolute format — app reads this to place machines
+
+  _fbDB.ref('/').update(updates).then(function() {
+    log('ok', 'Layout guardado en Firebase: ' + Object.keys(islePositions).length + ' islas con posicion absoluta');
+    notify('Layout guardado en la nube (' + Object.keys(islePositions).length + ' islas)');
+  }).catch(function(e) {
+    log('err', 'Error layout: ' + e.message);
   });
 }
 
@@ -988,17 +994,21 @@ function zoomFit() {
 }
 
 function saveLayoutToStorage_local() {
-  var edits = _buildMainAppEdits();
-  localStorage.setItem('slotmap_layout', JSON.stringify(edits));
-  localStorage.setItem('slotmap_layout_admin', JSON.stringify(_ladits));
-  var n = Object.keys(edits).length;
-  notify('Guardado: '+n+' islas modificadas');
-  logL('ok', 'Layout guardado. '+n+' islas con cambios vs original.');
-  logL('info', 'Abre slotmap-v13.html y toca "Sincronizar" en Layout para ver los cambios.');
+  var edits        = _buildMainAppEdits();
+  var islePositions = _buildIslePositions();
+
+  localStorage.setItem('slotmap_layout',         JSON.stringify(edits));
+  localStorage.setItem('slotmap_layout_admin',   JSON.stringify(_ladits));
+  localStorage.setItem('slotmap_isle_positions', JSON.stringify(islePositions));
+
+  var n = Object.keys(islePositions).length;
+  notify('Guardado: ' + n + ' islas');
+  logL('ok', 'Layout guardado. ' + n + ' posiciones absolutas en slotmap_isle_positions.');
+  logL('info', 'La app asigna coordenadas a maquinas nuevas leyendo isla → posicion.');
 }
 
 function _buildMainAppEdits() {
-  // Save ALL island positions (absolute) so app can rebuild layout fully
+  // Save ALL island positions as deltas (legacy compat)
   var edits = {};
   Object.keys(ISLAND_COORDS).forEach(function(isla){
     var p    = getIslePos(isla);
@@ -1008,11 +1018,41 @@ function _buildMainAppEdits() {
   return edits;
 }
 
+// Build absolute island positions map: {isla -> {x, y, zona}}
+// The app uses this directly to place machines: machine.x = islePositions[machine.i].x
+// This removes the dependency on _B64DATA / hardcoded coords in the app.
+function _buildIslePositions() {
+  var pos = {};
+  // All known islands from ISLAND_COORDS
+  Object.keys(ISLAND_COORDS).forEach(function(isla) {
+    var p    = getIslePos(isla);
+    var zona = getIsleZona(isla);
+    pos[isla] = { x: p.x, y: p.y, zona: zona };
+  });
+  // Any extra islands that appeared in the dynamic catalog but aren't in ISLAND_COORDS
+  if (window._dynamicIsleGroups) {
+    Object.keys(window._dynamicIsleGroups).forEach(function(isla) {
+      if (!pos[isla]) {
+        var zona = 'FUMAR';
+        if (MACHINES_CATALOG) {
+          var uid0 = window._dynamicIsleGroups[isla][0];
+          if (uid0 && MACHINES_CATALOG[uid0]) zona = MACHINES_CATALOG[uid0].z || 'FUMAR';
+        }
+        // Mark as unpositioned so admin can spot and fix it
+        pos[isla] = { x: 5, y: 5, zona: zona, unpositioned: true };
+        logL('warn', 'Isla ' + isla + ' no tiene coordenadas — aparecera en (5,5). Arrastrala al lugar correcto.');
+      }
+    });
+  }
+  return pos;
+}
+
 function resetLayoutAdmin() {
   if (!confirm('Resetear todo el layout?')) return;
   _ladits = {};
   localStorage.removeItem('slotmap_layout');
   localStorage.removeItem('slotmap_layout_admin');
+  localStorage.removeItem('slotmap_isle_positions');
   renderLayout();
   notify('Layout reiniciado', 'var(--amber)');
 }
