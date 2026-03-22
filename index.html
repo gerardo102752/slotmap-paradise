@@ -464,44 +464,52 @@ function initFirebase() {
         }
       });
 
-      // Cargar catálogo de máquinas + posiciones de islas desde Firebase
-      // slotmap_isle_positions: {isla -> {x, y, zona}} publicado por el admin al guardar layout
-      // slotmap_machines:       {uid  -> {i, j, p, z, ...}}
+      // Cargar catálogo + posiciones de islas desde Firebase en paralelo
+      // slotmap_isle_positions: {isla -> {x,y,zona}} — fuente de verdad del admin
+      // slotmap_machines:       {uid  -> {i,j,p,z,...}}
       Promise.all([
         _fbDB.ref('slotmap_machines').once('value'),
         _fbDB.ref('slotmap_isle_positions').once('value'),
         _fbDB.ref('slotmap_layout').once('value')
       ]).then(function(snaps) {
-        var catalog      = snaps[0].val();
-        var islePos      = snaps[1].val();  // absolute {isla: {x,y,zona}} — admin's source of truth
-        var layoutEdits  = snaps[2].val() || {};
+        var catalog     = snaps[0].val();
+        var islePos     = snaps[1].val();
+        var layoutEdits = snaps[2].val() || {};
 
+        // 1. Establecer posiciones de islas — SIEMPRE desde Firebase si existen
         if (islePos && Object.keys(islePos).length) {
-          // Use admin-published isle positions (preferred — works for new islands too)
           _islePositions = islePos;
-        } else {
-          // Fallback: reconstruct isle positions from hardcoded MI + layout deltas
+        } else if (Object.keys(layoutEdits).length) {
+          // Fallback: aplicar deltas sobre ISLAND_COORDS
           _islePositions = {};
-          Object.keys(MI).forEach(function(uid) {
-            var m = MI[uid];
-            if (m.i && !_islePositions[m.i]) {
-              var e = layoutEdits[m.i] || {dx:0, dy:0};
-              _islePositions[m.i] = {x: m.x + e.dx, y: m.y + e.dy};
-            }
+          Object.keys(ISLAND_COORDS).forEach(function(isla) {
+            var base = ISLAND_COORDS[isla];
+            var e    = layoutEdits[isla] || {dx:0, dy:0};
+            _islePositions[isla] = {x: base.x + e.dx, y: base.y + e.dy};
           });
         }
+        // Si ninguno existe, _getIslePos() cae a ISLAND_COORDS
 
         _layoutEdits = layoutEdits;
 
+        // 2. Asignar coords a máquinas y reemplazar MI
         if (catalog && Object.keys(catalog).length > 0) {
-          // Assign pixel-grid coordinates to every machine based on its isle position
           MI = assignCatalogCoords(catalog);
+          _clearZACache && _clearZACache();
           updateHeader();
           refreshAll();
-          notify('Catálogo cargado: ' + Object.keys(catalog).length + ' máquinas', 'var(--cyan)');
+          // Forzar re-render del layout si está visible
+          var vl = document.getElementById('vl');
+          if (vl && vl.classList.contains('active')) renderL();
+          notify('Catálogo: ' + Object.keys(catalog).length + ' máquinas cargadas', 'var(--cyan)');
+        } else if (islePos && Object.keys(islePos).length) {
+          // No hay catálogo nuevo pero sí posiciones — reasignar coords al MI actual
+          MI = assignCatalogCoords(MI);
+          var vl = document.getElementById('vl');
+          if (vl && vl.classList.contains('active')) renderL();
         }
       }).catch(function(e) {
-        console.warn('Error cargando catalogo:', e);
+        console.warn('Error cargando catalogo/layout:', e);
       });
 
       // Listen for layout changes (also picks up isle position updates)
@@ -623,25 +631,47 @@ function initLayoutEdits(){
 function saveLayoutEdits(){ localStorage.setItem('slotmap_layout',JSON.stringify(_layoutEdits)); }
 // Island positions loaded from Firebase/localStorage (published by admin's "Guardar")
 // Format: { "AA": {x, y, zona}, "AB": {x, y, zona}, ... }
+// Hardcoded island base coordinates (same as admin's ISLAND_COORDS).
+// Used as fallback when slotmap_isle_positions hasn't been published to Firebase yet.
+var ISLAND_COORDS = {"AA":{"x":21,"y":30},"AB":{"x":21,"y":34},"AC":{"x":10,"y":43},"AD":{"x":11,"y":35},"AE":{"x":15,"y":47},"AF":{"x":14,"y":56},"AG":{"x":11,"y":31},"AH":{"x":21,"y":44},"AI":{"x":10,"y":48},"AJ":{"x":21,"y":49},"BA":{"x":23,"y":43},"BB":{"x":27,"y":47},"BC":{"x":35,"y":34},"BD":{"x":28,"y":25},"BE":{"x":23,"y":52},"BF":{"x":28,"y":31},"BG":{"x":35,"y":44},"BH":{"x":28,"y":41},"BJ":{"x":23,"y":28},"BK":{"x":32,"y":34},"CA":{"x":41,"y":27},"CB":{"x":41,"y":34},"CD":{"x":46,"y":35},"CE":{"x":33,"y":25},"DA":{"x":44,"y":22},"DB":{"x":52,"y":27},"DC":{"x":52,"y":37},"DD":{"x":46,"y":27},"DE":{"x":34,"y":7},"DH":{"x":51,"y":21},"DI":{"x":48,"y":13},"DJ":{"x":52,"y":4},"DL":{"x":52,"y":12},"DM":{"x":45,"y":17},"DO":{"x":67,"y":34},"DP":{"x":40,"y":9},"DQ":{"x":39,"y":4},"DR":{"x":35,"y":4},"EA":{"x":59,"y":49},"EB":{"x":53,"y":56},"EC":{"x":53,"y":44},"ED":{"x":58,"y":37},"EE":{"x":66,"y":34},"EF":{"x":60,"y":29},"EH":{"x":58,"y":24},"EI":{"x":67,"y":20},"EJ":{"x":52,"y":28},"EK":{"x":64,"y":12},"EL":{"x":61,"y":4},"EM":{"x":67,"y":4},"EN":{"x":59,"y":13},"EO":{"x":54,"y":49},"EP":{"x":73,"y":4},"EW":{"x":58,"y":23},"FB":{"x":64,"y":47},"FC":{"x":75,"y":49},"FD":{"x":80,"y":34},"FE":{"x":77,"y":4},"FF":{"x":80,"y":29},"FG":{"x":75,"y":44},"FH":{"x":72,"y":33},"FI":{"x":71,"y":18},"FJ":{"x":67,"y":27},"FL":{"x":69,"y":44},"FM":{"x":80,"y":22},"FO":{"x":80,"y":16},"FP":{"x":72,"y":26},"FQ":{"x":73,"y":13},"FW":{"x":80,"y":39}};
+
+// Island positions — populated from Firebase slotmap_isle_positions (admin's source of truth).
+// Falls back to ISLAND_COORDS if Firebase hasn't been saved yet.
 var _islePositions = {};
 
-// Assign x,y to every machine in a catalog using _islePositions.
-// Machines within each isle are laid out in a 4-per-row grid from the isle origin.
+function _getIslePos(isla) {
+  if (_islePositions[isla]) return _islePositions[isla];
+  if (ISLAND_COORDS[isla])  return ISLAND_COORDS[isla];
+  return {x: 5, y: 5};
+}
+
+// Number of columns for each island — matches the real casino floor plan.
+// Machines are placed left-to-right, top-to-bottom within each island.
+var ISLE_COLS = {
+  "AA":2,"AB":2,"AC":2,"AD":1,"AE":2,"AF":4,"AG":1,"AH":3,"AI":2,"AJ":2,
+  "BA":4,"BB":4,"BC":6,"BD":4,"BE":3,"BF":4,"BG":6,"BH":4,"BJ":6,"BK":4,
+  "CA":6,"CB":6,"CD":4,"CE":6,
+  "DA":4,"DB":6,"DC":4,"DD":6,"DE":4,"DH":6,"DI":3,"DJ":8,"DL":8,"DM":4,
+  "DO":5,"DP":8,"DQ":6,"DR":2,
+  "EA":4,"EB":8,"EC":8,"ED":8,"EE":6,"EF":6,"EH":5,"EI":6,"EJ":8,"EK":8,
+  "EL":8,"EM":8,"EN":6,"EO":4,"EP":8,"EW":5,
+  "FB":5,"FC":4,"FD":4,"FE":6,"FF":4,"FG":6,"FH":5,"FI":6,"FJ":6,"FL":4,
+  "FM":6,"FO":5,"FP":8,"FQ":6,"FW":2
+};
+
+// Assign x,y to every machine using island positions + real column layout.
+// UIDs are sorted so AA01 < AA02 etc., preserving physical order within each island.
 function assignCatalogCoords(catalog) {
   var islaIdx = {};
   Object.keys(catalog).sort().forEach(function(uid) {
     var m    = catalog[uid];
     var isla = m.i || uid.slice(0, 2);
     if (!islaIdx[isla]) islaIdx[isla] = 0;
-    var ip = _islePositions[isla];
-    if (ip) {
-      var idx = islaIdx[isla];
-      catalog[uid].x = ip.x + (idx % 4);
-      catalog[uid].y = ip.y + Math.floor(idx / 4);
-    } else {
-      catalog[uid].x = 1;
-      catalog[uid].y = 1;
-    }
+    var ip   = _getIslePos(isla);
+    var cols = ISLE_COLS[isla] || 4;
+    var idx  = islaIdx[isla];
+    catalog[uid].x = ip.x + (idx % cols);
+    catalog[uid].y = ip.y + Math.floor(idx / cols);
     islaIdx[isla]++;
   });
   return catalog;
@@ -649,6 +679,15 @@ function assignCatalogCoords(catalog) {
 
 function getMachinePos(uid){
   var m = MI[uid];
+  // When _islePositions is populated from Firebase, m.x/m.y already reflect
+  // the correct absolute position set by the admin. No delta needed.
+  // _layoutEdits is only applied as an extra user drag-in-app adjustment
+  // (which is rarely used now that admin controls the layout).
+  if (Object.keys(_islePositions).length) {
+    // Coords already baked in via assignCatalogCoords — return as-is
+    return {x: m.x, y: m.y};
+  }
+  // Legacy path: coords from _B64DATA + layoutEdits delta
   var e = _layoutEdits[m.i];
   return e ? {x: m.x + e.dx, y: m.y + e.dy} : {x: m.x, y: m.y};
 }
